@@ -224,9 +224,9 @@ def send_wa(target: str, message: str) -> dict:
     return response.json()
 
 # 8. FLASK APP
-flask_app = Flask(__name__)
+app = Flask(__name__)
 
-@flask_app.route("/webhook", methods=["POST"])
+@app.route("/webhook", methods=["POST"])
 def webhook():
     data    = request.get_json(force=True, silent=True) or {}
     sender  = data.get("sender", "")
@@ -249,7 +249,7 @@ def webhook():
     send_wa(sender, answer)
     return jsonify({"status": "ok"}), 200
 
-@flask_app.route("/", methods=["GET"])
+@app.route("/", methods=["GET"])
 def health():
     return jsonify({"status": "WA Bot is running 🚀"}), 200
 
@@ -257,4 +257,4 @@ def health():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     print(f"🚀 WA Bot berjalan di port {port}...")
-    flask_app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port)

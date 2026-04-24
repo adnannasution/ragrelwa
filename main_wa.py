@@ -40,10 +40,76 @@ ATURAN FORMAT JAWABAN (KHUSUS WHATSAPP):
 3. Tebalkan poin penting dengan *teks* (format bold WhatsApp).
 4. Tambahkan emoticon yang relevan (📊, ✅, ⚠️) agar interaktif.
 
+INFORMASI TABEL YANG TERSEDIA:
+
+TABEL UTAMA:
+- anggaran_maintenance: rekap anggaran maintenance — kolom ru, tahun, kategori, tipe, nilai_usd.
+- pipeline_inspection: inspeksi pipeline — kolom refinery_unit, area, tag_number, last_inspection_date, next_inspection_date, rem_life_years, jumlah_temporary_repair.
+- rotor_monitoring: monitoring rotor — kolom refinery_unit, bulan, rotor, program, status_readiness_spare, status_workplan, action_plan_category.
+- atg_monitoring: monitoring ATG — kolom refinery_unit, tag_no_tangki, tag_no_atg, status_atg, cert_no_atg, date_expired_atg, status_rtl, month_update.
+- bad_actor_monitoring: bad actor equipment — kolom ru, tag_number, status, problem, action_plan, progress, target_date.
+- icu_monitoring: Integrity Concern Unit — kolom ru, icu_status, tag_no, issue, mitigation, permanent_solution, progress, target_closed, report_date.
+- metering_monitoring: monitoring metering — kolom refinery_unit, tag_number, status_metering, cert_no_metering, date_expired_metering, status_rtl, month_update.
+- program_kerja_atg: program kerja ATG — kolom refinery_unit, type, atg_eksisting, program_2024, prokja, action_plan_category, target, month_update.
+- paf: Plant Availability Factor — kolom type, ru, target_realisasi, value, plan_unplan, month.
+- zero_clamp: zero clamp monitoring — kolom ru, area, unit, tag_no_ln, type_damage, type_perbaikan, status, tanggal_dipasang, tanggal_rencana_perbaikan.
+- issue_paf: issue PAF — kolom type (Primary/Secondary Unit), ru, date, issue.
+- power_stream: power stream equipment — kolom refinery_unit, type_equipment, equipment, status_operation, desain, kapasitas_max, average_actual.
+- jumlah_eqp_utl: jumlah equipment utilitas — kolom refinery_unit, type_equipment, status_equipment, jumlah.
+- critical_eqp_utl: critical equipment utilitas — kolom refinery_unit, type_equipment, highlight_issue, corrective_action, mitigasi_action, target_corrective.
+- critical_eqp_prim_sec: critical equipment primer/sekunder — kolom refinery_unit, unit_proses, equipment, highlight_issue, corrective_action, mitigasi_action.
+- monitoring_operasi: monitoring operasi — kolom refinery_unit, unit_proses, unit, design, minimal_capacity, plant_readiness, actual, target_sts.
+- inspection_plan: rencana inspeksi — kolom refinery_unit, area, tag_no_ln, type_equipment, type_inspection, due_date, plan_date, actual_date, result_remaining_life, grand_result.
+- tkdn: Tingkat Kandungan Dalam Negeri — kolom refinery_unit, bulan, nominal, kdn, persentase, tahun.
+- rcps_rekomendasi: rekomendasi RCPS — kolom kilang, rcps_no, judul_rcps, rekomendasi, traffic, pic, target, remark.
+- rcps: daftar RCPS — kolom kilang, traffic, sum_of_progress, disiplin, judul_rcps, rcps_no, criticallity.
+- boc: Basis of Comparison equipment — kolom ru, area, unit, equipment, status, frequency, running_hours, mttr, mtbf, hasil.
+
+TABEL BARU (JETTY, TANK, SPM):
+- readiness_jetty: kesiapan operasional jetty — kolom refinery_unit, tag_no, status_operation, status_tuks, expired_tuks, status_ijin_ops, status_isps, status_struktur, status_trestle, status_mla, status_fire_protection, month_update.
+- workplan_jetty: workplan perbaikan jetty — kolom refinery_unit, tag_no, item, status_item, remark, rtl_action_plan, target, status_rtl, month_update.
+- readiness_tank: kesiapan operasional tangki — kolom refinery_unit, tag_number, type_tangki, service_tangki, prioritas, status_operational, atg_certification_validity, status_coi, status_atg, status_grounding, status_shell_course, status_roof, status_cathodic, month_update.
+- workplan_tank: workplan perbaikan tangki — kolom unit, tag_no, item, remark, rtl_action_plan, target, status_rtl, month_update.
+- readiness_spm: kesiapan operasional SPM — kolom refinery_unit, tag_no, status_operation, status_laik_operasi, expired_laik_operasi, status_ijin_spl, status_mbc, status_lds, status_mooring_hawser, status_floating_hose, status_cathodic_spl, month_update.
+- spm_workplan: workplan perbaikan SPM — kolom refinery_unit, tag_no, item, remark, rtl_action_plan, target, status_rtl, month_update.
+
 Table structure: {table_info}
 Question: {input}"""
 
-db       = SQLDatabase.from_uri(DATABASE_URL)
+db = SQLDatabase.from_uri(
+    DATABASE_URL,
+    include_tables=[
+        # Tabel lama
+        "anggaran_maintenance",
+        "pipeline_inspection",
+        "rotor_monitoring",
+        "atg_monitoring",
+        "bad_actor_monitoring",
+        "icu_monitoring",
+        "metering_monitoring",
+        "program_kerja_atg",
+        "paf",
+        "zero_clamp",
+        "issue_paf",
+        "power_stream",
+        "jumlah_eqp_utl",
+        "critical_eqp_utl",
+        "critical_eqp_prim_sec",
+        "monitoring_operasi",
+        "inspection_plan",
+        "tkdn",
+        "rcps_rekomendasi",
+        "rcps",
+        "boc",
+        # Tabel baru
+        "readiness_jetty",
+        "workplan_jetty",
+        "readiness_tank",
+        "workplan_tank",
+        "readiness_spm",
+        "spm_workplan",
+    ]
+)
 llm      = ChatOpenAI(
     model="gpt-4o",
     openai_api_key=DINOIKI_API_KEY,

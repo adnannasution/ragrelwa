@@ -30,11 +30,78 @@ llm = ChatOpenAI(
     temperature=0.7,
 )
 
+# 3. PRISMA INTEGRATION
+def query_prisma(sql: str) -> dict:
+    if not PRISMA_URL:
+        return {"ok": False, "error": "PRISMA_URL belum dikonfigurasi"}
+    try:
+        r = requests.post(
+            f"{PRISMA_URL}/chatbot/query",
+            headers=PRISMA_HEADERS,
+            json={"sql": sql},
+            timeout=30
+        )
+        return r.json()
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+def fetch_prisma_schema() -> str:
+    """
+    Fetch schema PRISMA via information_schema — sama konsepnya
+    dengan db.get_table_info() untuk database lokal.
+    Dipanggil sekali saat startup.
+    """
+    if not PRISMA_URL:
+        return ""
+    try:
+        sql = """
+            SELECT table_name, column_name, data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name IN (
+                'taex_reservasi', 'prisma_reservasi',
+                'kumpulan_summary', 'sap_pr', 'sap_po', 'work_order'
+              )
+            ORDER BY table_name, ordinal_position
+        """
+        result = query_prisma(sql)
+        if not result.get("ok"):
+            print(f"[PRISMA SCHEMA] Gagal: {result.get('error')}")
+            return ""
+
+        lines = ["SCHEMA PRISMA TA-ex (query via query_prisma, BUKAN DB lokal):"]
+        current_table = None
+        for row in result.get("data", []):
+            tbl   = row.get("table_name", "")
+            col   = row.get("column_name", "")
+            dtype = row.get("data_type", "")
+            if tbl != current_table:
+                current_table = tbl
+                lines.append(f"\n  Tabel: {current_table}")
+            col_display = f'"{col}"' if col == "order" else col
+            lines.append(f"    - {col_display} ({dtype})")
+
+        print("[PRISMA SCHEMA] Loaded OK")
+        return "\n".join(lines)
+    except Exception as e:
+        print(f"[PRISMA SCHEMA] Exception: {e}")
+        return ""
+
+# Fetch schema PRISMA sekali saat startup (seperti get_table_info local)
+PRISMA_SCHEMA = fetch_prisma_schema()
+
 SYSTEM_PROMPT = """You are a PostgreSQL expert and a helpful AI Assistant for a refinery company.
 Kamu memiliki memori percakapan — gunakan konteks dari pesan sebelumnya jika relevan.
 
-DATABASE SCHEMA:
+DATABASE LOKAL:
 {table_info}
+
+{prisma_schema}
+
+ATURAN ROUTING:
+- Jika pertanyaan relevan dengan tabel PRISMA di atas → query ke PRISMA
+- Jika relevan dengan tabel lokal → query database lokal
+- JANGAN campur keduanya
 
 ATURAN QUERY SQL:
 - Pilih tabel yang paling relevan berdasarkan nama tabel dan kolom yang tersedia.
@@ -43,6 +110,7 @@ ATURAN QUERY SQL:
 - Selalu gunakan NULLIF(kolom_penyebut, 0) untuk menghindari division by zero.
 - Gunakan ROUND(nilai::numeric, 2) untuk pembulatan.
 - JANGAN query SELECT * tanpa LIMIT. Selalu agregasi, filter, atau LIMIT 20.
+- Kolom "order" di tabel PRISMA WAJIB pakai tanda kutip ganda: "order"
 - Untuk bad_actor_monitoring: kolom utama adalah ru, tag_number, status, problem, action_plan, progress, target_date.
 - Untuk icu_monitoring: kolom utama adalah ru, icu_status (Medium/High/Critical/Low), tag_no, issue, mitigation, permanent_solution, progress, target_closed, report_date.
 - Untuk anggaran_maintenance: kolom nilai_usd adalah nilai dalam USD. Selalu tampilkan dengan format USD dan pemisah ribuan, contoh: 1,234,567.89 USD.
@@ -67,10 +135,12 @@ ATURAN QUERY SQL:
 - Untuk workplan_tank: kolom unit, tag_no, item, remark, rtl_action_plan, target, status_rtl, month_update.
 - Untuk readiness_spm: kolom refinery_unit, tag_no, status_operation, status_laik_operasi, expired_laik_operasi, status_ijin_spl, status_mbc, status_lds, status_mooring_hawser, status_floating_hose, status_cathodic_spl, month_update.
 - Untuk spm_workplan: kolom refinery_unit, tag_no, item, remark, rtl_action_plan, target, status_rtl, month_update.
-
-TABEL PRISMA TA-ex (query via query_prisma, bukan DB lokal):
-- taex_reservasi, prisma_reservasi, kumpulan_summary, sap_pr, sap_po, work_order
-- Keyword PRISMA: turnaround, TA, material, reservasi, PR, PO, kertas kerja, work order TA
+- Untuk status procurement PRISMA (join taex_reservasi + sap_po ON sap_po.purchreq = taex_reservasi.pr):
+    no-pr      : pr IS NULL atau pr = ''
+    pr-created : pr ada, belum ada PO
+    po-created : PO ada, qty_delivered = 0
+    partial    : qty_delivered > 0 tapi < po_quantity
+    complete   : qty_delivered >= po_quantity
 
 ATURAN FORMAT JAWABAN (KHUSUS WHATSAPP — NARASI SAJA):
 1. JAWABAN FULL NARASI — JANGAN gunakan tabel HTML, JANGAN format [CHART].
@@ -80,7 +150,7 @@ ATURAN FORMAT JAWABAN (KHUSUS WHATSAPP — NARASI SAJA):
 5. Tambahkan emoticon relevan (🏭, 💰, 📊, ✅, ⚠️, 🔧, 🛢️, 🚨).
 6. Maksimal 5 poin per jawaban agar tidak terlalu panjang di layar HP."""
 
-# 3. MEMORY PER NOMOR WA
+# 4. MEMORY PER NOMOR WA
 MAX_HISTORY = 10
 wa_histories: dict[str, list] = {}
 
@@ -98,21 +168,6 @@ def add_history(number: str, question: str, answer: str):
 def clear_history(number: str):
     wa_histories.pop(number, None)
 
-# 4. PRISMA INTEGRATION
-def query_prisma(sql: str) -> dict:
-    if not PRISMA_URL:
-        return {"ok": False, "error": "PRISMA_URL belum dikonfigurasi"}
-    try:
-        r = requests.post(
-            f"{PRISMA_URL}/chatbot/query",
-            headers=PRISMA_HEADERS,
-            json={"sql": sql},
-            timeout=30
-        )
-        return r.json()
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
 # 5. PRE-FILTER
 OUT_OF_SCOPE = [
     "cuaca", "berita", "news", "resep", "masak", "film", "musik",
@@ -123,12 +178,6 @@ DUMP_KEYWORDS = [
     "tampilkan semua", "lihat semua", "show all", "list semua",
     "seluruh isi", "semua baris", "semua data", "semua record",
     "export semua", "ceritakan semua",
-]
-PRISMA_KEYWORDS = [
-    "turnaround", "ta-ex", "taex", "reservasi", "material ta",
-    "purchase request", " pr ", "purchase order", " po ",
-    "kertas kerja", "work order ta", "belum pr", "sudah pr",
-    "sap pr", "sap po", "procurement",
 ]
 
 # 6. CORE AI FUNCTION
@@ -149,18 +198,33 @@ def run_wa(question: str, sender: str) -> str:
                 "• Mana yang sudah melewati target date?\n\n"
                 "💡 Untuk data lengkap, minta admin download via web.")
 
-    history = get_history(sender)
+    history    = get_history(sender)
     table_info = db.get_table_info()
 
     # Build messages dengan history
-    messages = [{"role": "system", "content": SYSTEM_PROMPT.format(table_info=table_info)}]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT.format(
+        table_info=table_info,
+        prisma_schema=PRISMA_SCHEMA if PRISMA_SCHEMA else "(PRISMA tidak tersedia)",
+    )}]
     for msg in history:
         if isinstance(msg, HumanMessage):
             messages.append({"role": "user", "content": msg.content})
         elif isinstance(msg, AIMessage):
             messages.append({"role": "assistant", "content": msg.content})
 
-    is_prisma = PRISMA_URL and any(kw in q_lower for kw in PRISMA_KEYWORDS)
+    # Routing: tanya LLM berdasarkan schema — tidak pakai keyword lagi
+    is_prisma = False
+    if PRISMA_URL and PRISMA_SCHEMA:
+        try:
+            routing = llm.invoke(messages + [{"role": "user", "content": (
+                f"Berdasarkan schema di atas, pertanyaan berikut perlu query ke tabel mana?\n"
+                f"Pertanyaan: '{question}'\n"
+                f"Jawab HANYA satu kata: 'PRISMA' atau 'LOCAL'"
+            )}])
+            is_prisma = "PRISMA" in routing.content.strip().upper()
+            print(f"[ROUTING] {'PRISMA' if is_prisma else 'LOCAL'} ← '{question[:60]}'")
+        except Exception as e:
+            print(f"[ROUTING ERROR] {e} — fallback LOCAL")
 
     if is_prisma:
         # Generate SQL untuk PRISMA
@@ -170,22 +234,26 @@ def run_wa(question: str, sender: str) -> str:
             f"Kolom 'order' WAJIB pakai tanda kutip ganda. LIMIT 50. SQL murni saja.\n"
             f"Pertanyaan: {question}"
         )}]
-        sql_resp = llm.invoke(sql_messages)
+        sql_resp  = llm.invoke(sql_messages)
         sql_query = sql_resp.content.replace("```sql", "").replace("```", "").strip()
+        print(f"[PRISMA SQL] {sql_query}")
 
         prisma_result = query_prisma(sql_query)
         if prisma_result.get("ok"):
-            db_result = f"Hasil PRISMA ({prisma_result.get('rows',0)} baris):\n{prisma_result.get('data',[])}"
+            db_result = f"Hasil PRISMA ({prisma_result.get('rows', 0)} baris):\n{prisma_result.get('data', [])}"
         else:
-            db_result = f"Query PRISMA gagal: {prisma_result.get('error')}"
+            err = prisma_result.get('error')
+            print(f"[PRISMA ERROR] {err} | SQL: {sql_query}")
+            db_result = f"Query PRISMA gagal: {err}"
     else:
         # Generate SQL untuk DB lokal
         sql_messages = messages + [{"role": "user", "content": (
             f"Berikan HANYA query SQL PostgreSQL yang valid untuk: {question}. "
             f"Tanpa penjelasan, tanpa markdown."
         )}]
-        sql_resp = llm.invoke(sql_messages)
+        sql_resp  = llm.invoke(sql_messages)
         sql_query = sql_resp.content.replace("```sql", "").replace("```", "").strip()
+        print(f"[LOCAL SQL] {sql_query}")
 
         try:
             db_result = db.run(sql_query)
@@ -201,7 +269,7 @@ def run_wa(question: str, sender: str) -> str:
             f"Ingat: narasi saja, tidak ada tabel HTML atau [CHART]."
         )}
     ]
-    final = llm.invoke(answer_messages)
+    final  = llm.invoke(answer_messages)
     answer = final.content.replace("```sql", "").replace("```", "").strip()
     answer = re.sub(r'\[CHART\].*?\[/CHART\]', '', answer, flags=re.DOTALL)
     answer = re.sub(r'<table.*?>.*?</table>', '', answer, flags=re.DOTALL)
@@ -239,10 +307,18 @@ def webhook():
     if not message:
         return jsonify({"status": "empty"}), 200
 
-    # Command reset
+    # Command reset history
     if message.lower() in ["/reset", "reset", ".reset"]:
         clear_history(sender)
         send_wa(sender, "🔄 *Percakapan direset.* Memori sesi sebelumnya dihapus.")
+        return jsonify({"status": "ok"}), 200
+
+    # Command reload schema PRISMA manual
+    if message.lower() in ["/reload", ".reload"]:
+        global PRISMA_SCHEMA
+        PRISMA_SCHEMA = fetch_prisma_schema()
+        status = "✅ Schema PRISMA berhasil di-reload." if PRISMA_SCHEMA else "⚠️ Gagal reload schema PRISMA."
+        send_wa(sender, status)
         return jsonify({"status": "ok"}), 200
 
     answer = run_wa(message, sender)
@@ -251,10 +327,14 @@ def webhook():
 
 @app.route("/", methods=["GET"])
 def health():
-    return jsonify({"status": "WA Bot is running 🚀"}), 200
+    return jsonify({
+        "status": "WA Bot is running 🚀",
+        "prisma_schema_loaded": bool(PRISMA_SCHEMA),
+    }), 200
 
 # 9. RUN
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     print(f"🚀 WA Bot berjalan di port {port}...")
+    print(f"📋 PRISMA Schema: {'✅ loaded' if PRISMA_SCHEMA else '❌ not available'}")
     app.run(host="0.0.0.0", port=port)

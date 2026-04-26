@@ -398,6 +398,31 @@ def webhook():
     sender  = data.get("sender", "")
     message = data.get("message", "").strip()
 
+    # ── Deteksi apakah pesan dari grup ──
+    # Fonnte mengirim "group" = true atau sender berformat XXXXXXXXXXX-XXXXXXXXXX@g.us
+    is_group = data.get("group", False) or (isinstance(sender, str) and "@g.us" in sender)
+
+    # ── Filter khusus grup: harus diawali trigger ──
+    GROUP_TRIGGERS = ["!tanya", "/tanya", "!ai", "/ai", "bot,", "bot:"]
+    if is_group:
+        message_lower = message.lower()
+        matched_trigger = None
+        for trigger in GROUP_TRIGGERS:
+            if message_lower.startswith(trigger):
+                matched_trigger = trigger
+                break
+
+        if not matched_trigger:
+            # Abaikan pesan grup yang tidak pakai trigger
+            print(f"[GRUP] Pesan diabaikan (tidak ada trigger): {message[:50]}")
+            return jsonify({"status": "ignored_no_trigger"}), 200
+
+        # Hapus trigger dari pesan, ambil pertanyaannya saja
+        message = message[len(matched_trigger):].strip()
+        if not message:
+            send_wa(sender, "❓ Pertanyaanmu kosong. Contoh: *!tanya berapa ICU critical di RU II?*")
+            return jsonify({"status": "ok"}), 200
+
     if sender not in ALLOWED_NUMBERS:
         print(f"Akses ditolak: {sender}")
         return jsonify({"status": "ignored"}), 200

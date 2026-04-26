@@ -217,14 +217,45 @@ def run_wa(question: str, sender: str) -> str:
         elif isinstance(msg, AIMessage):
             messages.append({"role": "assistant", "content": msg.content})
 
-    # ── Deteksi PRISMA via LLM — sama persis dengan web ──
+    # ── Cek awal: Klasifikasi intent dalam 1 call ──
+    intent_check = llm.invoke([{
+        "role": "user",
+        "content": (
+            f"Klasifikasikan pertanyaan berikut ke salah satu kategori:\n"
+            f"1. SAPAAN — jika sapaan, terima kasih, tanya kemampuan AI, atau obrolan umum yang tidak butuh data\n"
+            f"2. SPESIFIK — jika menyebut nama tabel/data berikut secara eksplisit: "
+            f"Pipeline, ATG, Metering, Rotor, ICU, Bad Actor, PAF, Zero Clamp, Power Stream, "
+            f"Anggaran, TKDN, RCPS, BOC, Readiness Jetty, Readiness Tank, Readiness SPM, "
+            f"Workplan Jetty, Workplan Tank, SPM Workplan, Inspection Plan, Monitoring Operasi, "
+            f"reservasi, PR, PO, material TA, turnaround\n"
+            f"3. AMBIGU — jika tidak menyebut nama tabel spesifik apapun\n"
+            f"CATATAN: Kata 'ru', 'refinery unit', 'kilang', 'equipment', 'laporan', 'data', "
+            f"'status', 'berapa', 'jumlah', 'tampilkan' BUKAN nama tabel — jika hanya menyebut "
+            f"kata-kata itu tanpa nama tabel spesifik maka AMBIGU.\n"
+            f"Jawab hanya satu kata: SAPAAN, SPESIFIK, atau AMBIGU\n\nPertanyaan: {question}"
+        )
+    }])
+    intent = intent_check.content.strip().upper()
+
+    if "SAPAAN" in intent:
+        greeting_response = llm.invoke(messages + [{"role": "user", "content": question}])
+        return greeting_response.content
+
+    if "AMBIGU" in intent:
+        return "Laporan apa yang kamu maksud? 😊 Misalnya: Pipeline, ATG, Metering, Rotor, ICU, Bad Actor, BOC, Anggaran, atau yang lain?"
+
+    # ── Cek PRISMA via LLM ──
     prisma_table_list = ", ".join(PRISMA_TABLES) if PRISMA_TABLES else "taex_reservasi, prisma_reservasi, kumpulan_summary, sap_pr, sap_po, work_order"
     prisma_check = llm.invoke([{
         "role": "user",
         "content": (
-            f"Apakah pertanyaan berikut berkaitan dengan data dari tabel PRISMA TA-ex berikut: "
-            f"{prisma_table_list}? "
-            f"Tabel ini berisi data procurement material turnaround kilang (reservasi, PR, PO, work order). "
+            f"Berdasarkan schema PRISMA TA-ex berikut:\n{PRISMA_SCHEMA_PROMPT}\n\n"
+            f"PENTING: Jawab YA hanya jika pertanyaan EKSPLISIT menyebut salah satu dari: "
+            f"reservasi, material TA, Purchase Request, PR, Purchase Order, PO, "
+            f"work order turnaround, kertas kerja, delivery material, stock material TA. "
+            f"Jika pertanyaan hanya menyebut 'laporan', 'data', 'status', 'berapa', "
+            f"'tampilkan' tanpa konteks procurement/pengadaan TA → jawab TIDAK. "
+            f"Apakah pertanyaan berikut berkaitan dengan data di PRISMA tersebut? "
             f"Jawab hanya YA atau TIDAK.\n\nPertanyaan: {question}"
         )
     }])
@@ -392,4 +423,4 @@ def health():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     print(f"🚀 WA Bot berjalan di port {port}...")
-    app.run(host="0.0.0.0", port=port) 
+    app.run(host="0.0.0.0", port=port)

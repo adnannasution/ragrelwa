@@ -30,6 +30,64 @@ llm = ChatOpenAI(
 )
 
 # ─── 3. PRISMA INTEGRATION ────────────────────────────────────────────────────
+def fetch_prisma_schema() -> dict:
+    """Fetch schema dari PRISMA saat startup."""
+    if not PRISMA_URL:
+        return {}
+    try:
+        r = requests.get(
+            f"{PRISMA_URL}/chatbot/schema",
+            headers=PRISMA_HEADERS,
+            timeout=15
+        )
+        return r.json()
+    except Exception as e:
+        print(f"[PRISMA] Gagal fetch schema: {e}")
+        return {}
+
+def build_prisma_schema_prompt(schema: dict) -> str:
+    if not schema or "tables" not in schema:
+        return ""
+    lines = [
+        "TABEL EKSTERNAL PRISMA TA-ex (data procurement material Turnaround):",
+        "Untuk pertanyaan tentang material TA, reservasi, PR, PO, work order turnaround — gunakan query_prisma(sql).",
+        "Tabel tersedia di PRISMA (BUKAN di database lokal):",
+    ]
+    for tbl_name, tbl in schema.get("tables", {}).items():
+        col_names = tbl.get("column_names", [])
+        desc      = tbl.get("description", "")
+        cols_display = []
+        for c in col_names:
+            if c == "order":
+                cols_display.append('"order"')
+            else:
+                cols_display.append(c)
+        lines.append(f'- {tbl_name}: {desc}')
+        lines.append(f'  kolom: {", ".join(cols_display)}')
+    if "join_hints" in schema:
+        lines.append("")
+        lines.append("JOIN HINTS:")
+        for k, v in schema["join_hints"].items():
+            lines.append(f"  {k}: {v}")
+    if "status_logic" in schema:
+        lines.append("")
+        lines.append("STATUS PROCUREMENT:")
+        for k, v in schema["status_logic"].items():
+            lines.append(f"  {k}: {v}")
+    if "important_notes" in schema:
+        lines.append("")
+        lines.append("CATATAN PENTING:")
+        for note in schema["important_notes"]:
+            lines.append(f"  - {note}")
+    lines += [
+        "",
+        "ATURAN QUERY PRISMA:",
+        '- Kolom "order" WAJIB ditulis dengan tanda kutip ganda: "order"',
+        "- Selalu gunakan LIMIT maksimal 50",
+        "- JANGAN query tabel PRISMA ke database lokal — gunakan query_prisma(sql)",
+    ]
+    return "\n".join(lines)
+
 def query_prisma(sql: str) -> dict:
     if not PRISMA_URL:
         return {"ok": False, "error": "PRISMA_URL belum dikonfigurasi"}
@@ -44,8 +102,15 @@ def query_prisma(sql: str) -> dict:
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
-# ─── 4. SYSTEM PROMPT — sama persis dengan web, tambah aturan WA ──────────────
-# {table_info} dan {input} diisi saat runtime
+# Fetch schema PRISMA saat startup
+PRISMA_SCHEMA        = fetch_prisma_schema()
+PRISMA_SCHEMA_PROMPT = build_prisma_schema_prompt(PRISMA_SCHEMA)
+PRISMA_TABLES        = set(PRISMA_SCHEMA.get("allowed_tables", [
+    "taex_reservasi", "prisma_reservasi", "kumpulan_summary",
+    "sap_pr", "sap_po", "work_order"
+]))
+
+# ─── 4. SYSTEM PROMPT ─────────────────────────────────────────────────────────
 CUSTOM_PROMPT = """You are a PostgreSQL expert and a helpful AI Assistant for a refinery company.
 Given an input question, create a syntactically correct PostgreSQL query to run.
 HANYA BERIKAN QUERY SQL MURNI, TANPA MARKDOWN ATAU BACKTICK.
@@ -64,11 +129,17 @@ ATURAN QUERY SQL:
 - Gunakan ROUND(nilai::numeric, 2) untuk pembulatan.
 - Jika pertanyaan melibatkan lebih dari satu tabel, gunakan JOIN yang sesuai.
 - PENTING: Jangan pernah query SELECT * tanpa LIMIT. Selalu gunakan agregasi, filter, atau LIMIT 20.
-- DETEKSI PERTANYAAN TIDAK PRODUKTIF: Jika user meminta salah satu dari berikut, JANGAN query — langsung tolak dengan sopan:
+- DETEKSI PERTANYAAN TIDAK PRODUKTIF: Jika user meminta salah satu dari berikut, JANGAN query — langsung tolak dengan sopan dan arahkan ke pertanyaan analisis yang lebih tepat:
   * "tampilkan semua", "list semua", "show all", "lihat semua", "ceritakan semua"
   * "tampilkan seluruh isi tabel", "dump data", "export semua"
+  * Pertanyaan yang jelas akan menghasilkan ribuan baris teks panjang (action plan, progress, prokja, issue, mitigasi)
   * Pertanyaan di luar konteks maintenance kilang (cuaca, berita, pengetahuan umum, coding, dll)
+  Untuk pertanyaan view massal → berikan ringkasan agregasi saja.
   Untuk pertanyaan di luar konteks → jawab: "Maaf, saya hanya dapat membantu analisis data maintenance kilang."
+  PENGECUALIAN — tetap jawab dengan ramah untuk:
+  * Sapaan umum (halo, hi, selamat pagi, dsb) → balas dengan ramah
+  * Pertanyaan tentang kemampuan AI ini (apa yang bisa kamu lakukan, fitur apa saja, dsb) → jelaskan semua data yang tersedia
+  * Ucapan terima kasih → balas dengan sopan
 - Untuk icu_monitoring: kolom utama adalah ru, icu_status (Medium/High/Critical/Low), tag_no, issue, mitigation, permanent_solution, progress, target_closed, report_date.
 - Untuk program_kerja_atg: kolom utama adalah refinery_unit, type, atg_eksisting, program_2024, prokja (progress), action_plan_category, target, month_update.
 - Untuk paf: Plant Availability Factor — kolom type, ru, target_realisasi, value (angka PAF), plan_unplan, month.
@@ -92,58 +163,20 @@ ATURAN QUERY SQL:
 - Untuk readiness_spm: kesiapan operasional SPM — kolom refinery_unit, tag_no, status_operation, status_laik_operasi, expired_laik_operasi, status_ijin_spl, status_mbc, status_lds, status_mooring_hawser, status_floating_hose, status_cathodic_spl, month_update.
 - Untuk spm_workplan: workplan perbaikan SPM — kolom refinery_unit, tag_no, item, remark, rtl_action_plan, target, status_rtl, month_update.
 
-TABEL EKSTERNAL PRISMA TA-ex (data procurement material Turnaround):
-Untuk pertanyaan tentang material TA, reservasi, PR, PO, work order turnaround — gunakan query_prisma(sql).
-Tabel yang tersedia di sistem PRISMA (BUKAN di database lokal ini):
-- taex_reservasi: reservasi material utama TA-ex
-  kolom: plant, equipment, "order" (pakai tanda kutip!), reservno, material, material_description,
-         qty_reqmts, qty_stock, pr, item, qty_pr, del, fis, ict, pg, reqmts_date, uom, res_price, res_curr
-- prisma_reservasi: subset taex aktif (ict=L)
-  kolom: plant, equipment, "order", material, qty_reqmts, qty_stock_onhand,
-         pr_prisma, qty_pr_prisma, code_kertas_kerja
-- kumpulan_summary: ringkasan kebutuhan material per kertas kerja
-  kolom: material, material_description, qty_req, qty_stock, qty_pr, qty_to_pr, code_tracking
-- sap_pr: Purchase Request dari SAP
-  kolom: plant, pr, material, material_description, qty_pr, req_date, release_date, tracking_no
-- sap_po: Purchase Order dari SAP
-  kolom: plnt, purchreq (=nomor PR), material, po, po_quantity, qty_delivered, deliv_date, net_price, crcy
-- work_order: Work Order dari SAP
-  kolom: plant, "order", equipment, description, system_status, planner_group,
-         basic_start_date, basic_finish_date, total_plan_cost, total_act_cost
-
-STATUS PROCUREMENT (join taex + sap_po ON sap_po.purchreq = taex_reservasi.pr):
-- no-pr:      pr IS NULL atau pr = ''
-- pr-created: pr ada, belum ada PO
-- po-created: PO ada, qty_delivered = 0
-- partial:    qty_delivered > 0 tapi < po_quantity
-- complete:   qty_delivered >= po_quantity
-
-ATURAN QUERY PRISMA:
-- Kolom "order" WAJIB ditulis dengan tanda kutip ganda: "order"
-- Selalu gunakan LIMIT maksimal 50
-- Keyword PRISMA: turnaround, TA, material, reservasi, PR, PO, kertas kerja, work order TA
-- JANGAN query tabel PRISMA ke database lokal — gunakan query_prisma()
+{prisma_schema}
 
 ATURAN FORMAT JAWABAN (KHUSUS WHATSAPP — NARASI SAJA):
-1. JAWABAN FULL NARASI — JANGAN gunakan tabel HTML, JANGAN format [CHART].
-2. Jika hasil lebih dari 10 item, tampilkan ringkasan/highlight saja.
-3. Gunakan poin-poin (•) jika data lebih dari satu.
+1. JAWABAN FULL NARASI — JANGAN gunakan tabel HTML, JANGAN format [CHART], JANGAN [DOWNLOAD:key].
+2. Jika hasil lebih dari 10 item, tampilkan ringkasan/highlight saja, maksimal 5-7 poin.
+3. Gunakan poin-poin dengan tanda • jika data lebih dari satu.
 4. Tebalkan poin penting dengan *teks* (bold WhatsApp).
-5. Tambahkan emoticon relevan (🏭, 💰, 📊, ✅, ⚠️, 🔧, 🛢️, 🚨).
-6. Maksimal 5 poin per jawaban agar tidak terlalu panjang di layar HP.
+5. Tambahkan emoticon relevan (🏭, 💰, 📊, ✅, ⚠️, 🔧, 🛢️, 🚨, 🔴).
+6. Gunakan angka dengan format mudah dibaca (contoh: 1.234.567 atau Rp 1,2 M).
+7. Akhiri dengan kalimat penutup singkat jika data panjang, contoh: "_(Menampilkan highlight, tanya lebih spesifik untuk detail)_"
 
 Question: {input}"""
 
-# ─── 5. PRISMA KEYWORDS — sama persis dengan web ──────────────────────────────
-PRISMA_KEYWORDS = [
-    "turnaround", "ta-ex", "taex", "reservasi", "material ta",
-    "purchase request", " pr ", "purchase order", " po ",
-    "kertas kerja", "kumpulan summary", "work order ta",
-    "belum pr", "sudah pr", "delivery material", "stock onhand",
-    "sap pr", "sap po", "procurement",
-]
-
-# ─── 6. MEMORY PER NOMOR WA ───────────────────────────────────────────────────
+# ─── 5. MEMORY PER NOMOR WA ───────────────────────────────────────────────────
 MAX_HISTORY = 10
 wa_histories: dict[str, list] = {}
 
@@ -161,58 +194,124 @@ def add_history(number: str, question: str, answer: str):
 def clear_history(number: str):
     wa_histories.pop(number, None)
 
-# ─── 7. CORE FUNCTION — sama persis logika run_with_memory web ────────────────
+# ─── 6. CORE FUNCTION ─────────────────────────────────────────────────────────
 def run_wa(question: str, sender: str) -> str:
     history    = get_history(sender)
     table_info = db_engine.get_table_info()
 
-    # Build messages dengan history — sama persis dengan web
-    messages = [{"role": "system", "content": CUSTOM_PROMPT.replace("{table_info}", table_info).replace("{input}", "")}]
+    # Build prompt — sama seperti web, dengan unescape {{ → {
+    prisma_prompt = PRISMA_SCHEMA_PROMPT or "(PRISMA schema belum tersedia)"
+    _prompt = (CUSTOM_PROMPT
+        .replace("{table_info}", table_info)
+        .replace("{prisma_schema}", prisma_prompt)
+        .replace("{input}", "")
+        .replace("{{", "{")
+        .replace("}}", "}")
+    )
+
+    # Build messages dengan history
+    messages = [{"role": "system", "content": _prompt}]
     for msg in history:
         if isinstance(msg, HumanMessage):
             messages.append({"role": "user", "content": msg.content})
         elif isinstance(msg, AIMessage):
             messages.append({"role": "assistant", "content": msg.content})
 
-    # Deteksi PRISMA — sama persis dengan web
-    is_prisma = any(kw in question.lower() for kw in PRISMA_KEYWORDS)
+    # ── Deteksi PRISMA via LLM — sama persis dengan web ──
+    prisma_table_list = ", ".join(PRISMA_TABLES) if PRISMA_TABLES else "taex_reservasi, prisma_reservasi, kumpulan_summary, sap_pr, sap_po, work_order"
+    prisma_check = llm.invoke([{
+        "role": "user",
+        "content": (
+            f"Apakah pertanyaan berikut berkaitan dengan data dari tabel PRISMA TA-ex berikut: "
+            f"{prisma_table_list}? "
+            f"Tabel ini berisi data procurement material turnaround kilang (reservasi, PR, PO, work order). "
+            f"Jawab hanya YA atau TIDAK.\n\nPertanyaan: {question}"
+        )
+    }])
+    is_prisma = "YA" in prisma_check.content.strip().upper()
 
     if is_prisma and PRISMA_URL:
-        # ── PRISMA PATH — sama persis dengan web ──
-        sql_messages = messages + [{"role": "user", "content": (
-            f"Berikan HANYA query SQL PostgreSQL yang valid untuk pertanyaan berikut "
-            f"menggunakan tabel PRISMA TA-ex. "
-            f"Tabel tersedia: taex_reservasi, prisma_reservasi, kumpulan_summary, sap_pr, sap_po, work_order. "
-            f"ATURAN WAJIB:\n"
-            f"1. Kolom 'order' SELALU ditulis dengan tanda kutip ganda: \"order\"\n"
-            f"2. Selalu tambahkan LIMIT 50 di akhir query\n"
-            f"3. Untuk hitung yang sudah PR: WHERE pr IS NOT NULL AND pr != ''\n"
-            f"4. Untuk hitung yang belum PR: WHERE pr IS NULL OR pr = ''\n"
-            f"5. Untuk status PO: JOIN sap_po ON sap_po.purchreq = taex_reservasi.pr\n"
-            f"6. Gunakan COUNT(*) atau COUNT(DISTINCT ...) untuk agregasi\n"
-            f"7. HANYA output SQL murni, tanpa penjelasan, tanpa markdown, tanpa backtick\n"
-            f"\nPertanyaan: {question}"
-        )}]
-        sql_response = llm.invoke(sql_messages)
-        sql_query    = sql_response.content.replace("```sql", "").replace("```", "").strip()
-        print(f"[PRISMA SQL] {sql_query}")
+        # ── Deteksi jalur: SEDERHANA atau KOMPLEKS — sama persis dengan web ──
+        SIMPLE_PATTERNS = [
+            "berapa", "total", "jumlah", "rangkuman", "ringkasan",
+            "summary", "status", "berapa yang", "sudah pr", "belum pr",
+            "sudah po", "belum po", "complete", "partial",
+        ]
+        COMPLEX_PATTERNS = [
+            "per equipment", "per order", "per material", "per plant",
+            "nilai po", "net price", "harga", "breakdown", "detail",
+            "join", "gabungkan", "bandingkan", "lebih dari", "kurang dari",
+            "terbesar", "terkecil", "tertinggi", "terendah",
+        ]
 
-        prisma_result = query_prisma(sql_query)
-        if prisma_result.get("ok"):
-            rows      = prisma_result.get('rows', 0)
-            data      = prisma_result.get('data', [])
-            db_result = f"Hasil dari PRISMA TA-ex ({rows} baris):\n{data}"
+        q_low      = question.lower()
+        is_simple  = any(p in q_low for p in SIMPLE_PATTERNS)
+        is_complex = any(p in q_low for p in COMPLEX_PATTERNS)
+        use_simple = is_simple and not is_complex
+
+        if use_simple:
+            # ── JALUR SEDERHANA: GET /chatbot/tracking ──
+            params = {}
+            if "belum pr" in q_low or "no-pr" in q_low or "no pr" in q_low:
+                params["status"] = "no-pr"
+            elif "pr created" in q_low or "sudah pr" in q_low:
+                params["status"] = "pr-created"
+            elif "po created" in q_low or "sudah po" in q_low:
+                params["status"] = "po-created"
+            elif "partial" in q_low or "sebagian" in q_low:
+                params["status"] = "partial"
+            elif "complete" in q_low or "selesai" in q_low or "lengkap" in q_low:
+                params["status"] = "complete"
+
+            if any(k in q_low for k in ["rangkuman", "ringkasan", "summary", "total", "berapa"]):
+                params["summary_only"] = "true"
+
+            params["chatbot_key"] = CHATBOT_API_KEY
+
+            try:
+                r = requests.get(f"{PRISMA_URL}/chatbot/tracking",
+                                 params=params, timeout=30)
+                prisma_result = r.json()
+                print(f"[PRISMA SIMPLE] params: {params}")
+                db_result = f"Hasil dari PRISMA TA-ex (jalur sederhana):\n{prisma_result}"
+            except Exception as e:
+                db_result = f"Gagal fetch PRISMA tracking: {str(e)}"
+
         else:
-            err = prisma_result.get('error', 'Unknown error')
-            print(f"[PRISMA ERROR] SQL: {sql_query}")
-            print(f"[PRISMA ERROR] Error: {err}")
-            db_result = (
-                f"Query PRISMA gagal. SQL yang dicoba: {sql_query}. "
-                f"Error: {err}. "
-                f"Coba perbaiki query atau arahkan user ke aplikasi PRISMA langsung."
-            )
+            # ── JALUR KOMPLEKS: POST /chatbot/query ──
+            sql_messages = messages + [{"role": "user", "content": (
+                f"Berikan HANYA query SQL PostgreSQL yang valid untuk pertanyaan berikut "
+                f"menggunakan tabel PRISMA TA-ex. "
+                f"Tabel tersedia: taex_reservasi, prisma_reservasi, kumpulan_summary, sap_pr, sap_po, work_order. "
+                f"ATURAN WAJIB:\n"
+                f"1. Kolom 'order' SELALU ditulis dengan tanda kutip ganda: \"order\"\n"
+                f"2. Selalu tambahkan LIMIT 50 di akhir query\n"
+                f"3. Untuk hitung yang sudah PR: WHERE pr IS NOT NULL AND pr != ''\n"
+                f"4. Untuk hitung yang belum PR: WHERE pr IS NULL OR pr = ''\n"
+                f"5. Untuk status PO: JOIN sap_po ON sap_po.purchreq = taex_reservasi.pr\n"
+                f"6. Gunakan COUNT(*) atau COUNT(DISTINCT ...) untuk agregasi\n"
+                f"7. HANYA output SQL murni, tanpa penjelasan, tanpa markdown, tanpa backtick\n"
+                f"\nPertanyaan: {question}"
+            )}]
+            sql_response = llm.invoke(sql_messages)
+            sql_query    = sql_response.content.replace("```sql", "").replace("```", "").strip()
+            print(f"[PRISMA SQL] {sql_query}")
+
+            prisma_result = query_prisma(sql_query)
+            if prisma_result.get("ok"):
+                rows      = prisma_result.get('rows', 0)
+                data      = prisma_result.get('data', [])
+                db_result = f"Hasil dari PRISMA TA-ex ({rows} baris):\n{data}"
+            else:
+                err = prisma_result.get('error', 'Unknown error')
+                print(f"[PRISMA ERROR] SQL: {sql_query}")
+                print(f"[PRISMA ERROR] Error: {err}")
+                db_result = (
+                    f"Query PRISMA gagal. SQL yang dicoba: {sql_query}. "
+                    f"Error: {err}."
+                )
     else:
-        # ── LOCAL PATH — sama persis dengan web ──
+        # ── LOCAL PATH ──
         sql_messages = messages + [{"role": "user", "content": (
             f"Berikan HANYA query SQL PostgreSQL yang valid untuk: {question}. "
             f"Tanpa penjelasan, tanpa markdown."
@@ -226,13 +325,13 @@ def run_wa(question: str, sender: str) -> str:
         except Exception as e:
             db_result = f"Query error: {str(e)}"
 
-    # Generate jawaban final — format WhatsApp, bukan HTML
+    # Generate jawaban final — format WhatsApp
     answer_messages = messages + [
         {"role": "user", "content": question},
         {"role": "user", "content": (
             f"Hasil query SQL:\n{db_result}\n\n"
             f"Berikan jawaban final dalam Bahasa Indonesia sesuai aturan format WhatsApp. "
-            f"Ingat: narasi saja, tidak ada tabel HTML atau [CHART]."
+            f"Ingat: narasi saja, tidak ada tabel HTML, tidak ada [CHART], tidak ada [DOWNLOAD:key]."
         )}
     ]
     final_response = llm.invoke(answer_messages)
@@ -249,7 +348,7 @@ def run_wa(question: str, sender: str) -> str:
 
     return answer
 
-# ─── 8. HELPER ────────────────────────────────────────────────────────────────
+# ─── 7. HELPER ────────────────────────────────────────────────────────────────
 def send_wa(target: str, message: str) -> dict:
     response = requests.post(
         "https://api.fonnte.com/send",
@@ -259,7 +358,7 @@ def send_wa(target: str, message: str) -> dict:
     )
     return response.json()
 
-# ─── 9. FLASK APP ─────────────────────────────────────────────────────────────
+# ─── 8. FLASK APP ─────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
 @app.route("/webhook", methods=["POST"])
@@ -289,7 +388,7 @@ def webhook():
 def health():
     return jsonify({"status": "WA Bot is running 🚀"}), 200
 
-# ─── 10. RUN ──────────────────────────────────────────────────────────────────
+# ─── 9. RUN ───────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     print(f"🚀 WA Bot berjalan di port {port}...")

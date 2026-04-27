@@ -427,7 +427,9 @@ def webhook():
             return jsonify({"status": "ok"}), 200
 
     # ── Cek apakah pengirim diizinkan ──
-    if identity not in ALLOWED_NUMBERS:
+    # Grup: sudah lolos filter trigger, langsung proses (Fonnte tidak kirim participant)
+    # Personal: tetap cek ALLOWED_NUMBERS seperti biasa
+    if not is_group and identity not in ALLOWED_NUMBERS:
         print(f"Akses ditolak: {identity}")
         return jsonify({"status": "ignored"}), 200
 

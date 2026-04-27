@@ -399,11 +399,15 @@ def webhook():
     message = data.get("message", "").strip()
 
     # ── Deteksi apakah pesan dari grup ──
-    # Fonnte mengirim "group" = true atau sender berformat XXXXXXXXXXX-XXXXXXXXXX@g.us
-    is_group = data.get("group", False) or (isinstance(sender, str) and "@g.us" in sender)
+    # Fonnte mengirim sender berformat ID grup, participant = nomor pengirim asli
+    is_group    = data.get("group", False) or (isinstance(sender, str) and "@g.us" in sender)
+    participant = data.get("participant", "")  # nomor WA anggota yang kirim pesan di grup
+    identity    = participant if is_group and participant else sender  # untuk cek ALLOWED_NUMBERS
+
+    print(f"[WEBHOOK] sender={sender}, participant={participant}, is_group={is_group}, identity={identity}")
 
     # ── Filter khusus grup: harus diawali trigger ──
-    GROUP_TRIGGERS = ["!tanya", "/tanya", "!ai", "/ai", "bot,", "bot:"]
+    GROUP_TRIGGERS = ["!tanya", "/tanya", "!ai", "/ai", "bot:", "bot :"]
     if is_group:
         message_lower = message.lower()
         matched_trigger = None
@@ -413,7 +417,6 @@ def webhook():
                 break
 
         if not matched_trigger:
-            # Abaikan pesan grup yang tidak pakai trigger
             print(f"[GRUP] Pesan diabaikan (tidak ada trigger): {message[:50]}")
             return jsonify({"status": "ignored_no_trigger"}), 200
 
@@ -423,8 +426,9 @@ def webhook():
             send_wa(sender, "❓ Pertanyaanmu kosong. Contoh: *!tanya berapa ICU critical di RU II?*")
             return jsonify({"status": "ok"}), 200
 
-    if sender not in ALLOWED_NUMBERS:
-        print(f"Akses ditolak: {sender}")
+    # ── Cek apakah pengirim diizinkan ──
+    if identity not in ALLOWED_NUMBERS:
+        print(f"Akses ditolak: {identity}")
         return jsonify({"status": "ignored"}), 200
 
     if not message:
@@ -432,11 +436,11 @@ def webhook():
 
     # Command reset history
     if message.lower() in ["/reset", "reset", ".reset"]:
-        clear_history(sender)
+        clear_history(identity)
         send_wa(sender, "🔄 *Percakapan direset.* Memori sesi sebelumnya dihapus.")
         return jsonify({"status": "ok"}), 200
 
-    answer = run_wa(message, sender)
+    answer = run_wa(message, identity)
     send_wa(sender, answer)
     return jsonify({"status": "ok"}), 200
 

@@ -1,5 +1,6 @@
 import os
 import re
+import threading
 import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
@@ -392,11 +393,21 @@ def send_wa(target: str, message: str) -> dict:
 # ─── 8. FLASK APP ─────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
+# ✅ FIX 1: Set untuk deduplication — simpan message ID yang sudah diproses
+processed_messages: set = set()
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data    = request.get_json(force=True, silent=True) or {}
     sender  = data.get("sender", "")
     message = data.get("message", "").strip()
+
+    # ✅ FIX 2: Deduplication — tolak pesan yang sama jika dikirim ulang Fonnte
+    msg_id = data.get("id") or data.get("message_id") or f"{sender}:{message[:80]}"
+    if msg_id in processed_messages:
+        print(f"[DUPLIKAT DIABAIKAN] {msg_id}")
+        return jsonify({"status": "duplicate"}), 200
+    processed_messages.add(msg_id)
 
     # ── Deteksi apakah pesan dari grup ──
     # Fonnte mengirim sender berformat ID grup, participant = nomor pengirim asli
@@ -423,7 +434,11 @@ def webhook():
         # Hapus trigger dari pesan, ambil pertanyaannya saja
         message = message[len(matched_trigger):].strip()
         if not message:
-            send_wa(sender, "❓ Pertanyaanmu kosong. Contoh: *!tanya berapa ICU critical di RU II?*")
+            threading.Thread(
+                target=send_wa,
+                args=(sender, "❓ Pertanyaanmu kosong. Contoh: *!tanya berapa ICU critical di RU II?*"),
+                daemon=True
+            ).start()
             return jsonify({"status": "ok"}), 200
 
     # ── Cek apakah pengirim diizinkan ──
@@ -439,12 +454,24 @@ def webhook():
     # Command reset history
     if message.lower() in ["/reset", "reset", ".reset"]:
         clear_history(identity)
-        send_wa(sender, "🔄 *Percakapan direset.* Memori sesi sebelumnya dihapus.")
+        threading.Thread(
+            target=send_wa,
+            args=(sender, "🔄 *Percakapan direset.* Memori sesi sebelumnya dihapus."),
+            daemon=True
+        ).start()
         return jsonify({"status": "ok"}), 200
 
-    answer = run_wa(message, identity)
-    send_wa(sender, answer)
-    return jsonify({"status": "ok"}), 200
+    # ✅ FIX 3: Proses di background thread — reply 200 OK langsung ke Fonnte
+    # agar Fonnte tidak timeout dan tidak kirim ulang webhook yang sama
+    def process():
+        try:
+            answer = run_wa(message, identity)
+            send_wa(sender, answer)
+        except Exception as e:
+            print(f"[ERROR] Gagal proses pesan dari {identity}: {e}")
+
+    threading.Thread(target=process, daemon=True).start()
+    return jsonify({"status": "ok"}), 200  # ← langsung reply, tidak tunggu LLM selesai
 
 @app.route("/", methods=["GET"])
 def health():

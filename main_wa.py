@@ -163,6 +163,8 @@ ATURAN QUERY SQL:
 - Untuk workplan_tank: workplan perbaikan tangki — kolom unit, tag_no, item, remark, rtl_action_plan, target, status_rtl, month_update.
 - Untuk readiness_spm: kesiapan operasional SPM — kolom refinery_unit, tag_no, status_operation, status_laik_operasi, expired_laik_operasi, status_ijin_spl, status_mbc, status_lds, status_mooring_hawser, status_floating_hose, status_cathodic_spl, month_update.
 - Untuk spm_workplan: workplan perbaikan SPM — kolom refinery_unit, tag_no, item, remark, rtl_action_plan, target, status_rtl, month_update.
+- Untuk irkap_program: daftar program kerja IRKAP 2024. KOLOM YANG TERSEDIA (gunakan HANYA nama kolom ini, jangan tambah kolom lain): refinery_unit, disiplin, kategori_rkap, material_jasa, highlevel_planning_note, referensi_prokja_sebelumnya, no_program_kerja, equipment_tag_no, type_equipment, detail_type_equipment, program_kerja, step_plan_today, detail_step_plan_today, step_actual_today, detail_step_actual_today, status_step, start_plan, finish_plan, status_prognosa, kelompok_biaya, nilai_anggaran_idr, nilai_anggaran_usd, top_risk, asset_integrity. TIDAK ADA kolom month_update, bulan, tahun, atau year di tabel ini — jangan generate kolom tersebut. Untuk filter tahun gunakan EXTRACT(YEAR FROM start_plan::DATE). Tampilkan nilai_anggaran_idr dengan format Rp.
+- Untuk irkap_actual: realisasi step pelaksanaan IRKAP. KOLOM YANG TERSEDIA (gunakan HANYA nama kolom ini): no, no_program, kategori_rkap, program_asset_integrity, refinery_unit, area, unit_process, tag_no, dasar_pengusulan, rekomendasi, program_kerja, disiplin, kategory_trigger, kelompok_sasaran_rk, kel_biaya, note, release_type, jadwal_pelaksanaan, jadwal_cost, jadwal_cash, strategy_penyelesaian, failure_impact, high_level_planning_note, referensi_prokja_sebelumnya, cost_center, cost_element, wbs_number, anggaran_idr, anggaran_usd, anggaran_equivalent_idr, probability_class, probability_likelyhood, economic_usd, health_safety, environment, ram_criticality, material_jasa, sumber_harga, actual_start1, actual_finish1, comp1, notif_no, actual_start2, actual_finish2, comp2, actual_start3, actual_finish3, comp3, wo_no, actual_start4, actual_finish4, comp4, ro_no, actual_start5, actual_finish5, comp5, actual_start6, actual_finish6, comp6, pr, actual_start7, actual_finish7, comp7, rfq, actual_start8, actual_finish8, comp8, po, actual_start9, actual_finish9, comp9, gr_no, actual_start10, actual_finish10, comp10, gi_no, actual_start11, actual_finish11, comp11, actual_start12, actual_finish12, comp12, actual_start13, actual_finish13, comp13, sa_no, actual_start14, actual_finish14, comp14, actual_start15, actual_finish15, comp15, current_step, status_step, status_prognosa. TIDAK ADA kolom month_update, bulan, tahun di tabel ini. Gunakan status_prognosa ('On Fiscal Year', 'Next Year', 'Closed') dan current_step untuk analisis progres.
 
 {prisma_schema}
 
@@ -218,32 +220,53 @@ def run_wa(question: str, sender: str) -> str:
         elif isinstance(msg, AIMessage):
             messages.append({"role": "assistant", "content": msg.content})
 
-    # ── Cek awal: Klasifikasi intent dalam 1 call ──
-    intent_check = llm.invoke([{
-        "role": "user",
-        "content": (
-            f"Klasifikasikan pertanyaan berikut ke salah satu kategori:\n"
-            f"1. SAPAAN — jika sapaan, terima kasih, tanya kemampuan AI, atau obrolan umum yang tidak butuh data\n"
-            f"2. SPESIFIK — jika menyebut nama tabel/data berikut secara eksplisit: "
-            f"Pipeline, ATG, Metering, Rotor, ICU, Bad Actor, PAF, Zero Clamp, Power Stream, "
-            f"Anggaran, TKDN, RCPS, BOC, Readiness Jetty, Readiness Tank, Readiness SPM, "
-            f"Workplan Jetty, Workplan Tank, SPM Workplan, Inspection Plan, Monitoring Operasi, "
-            f"reservasi, PR, PO, material TA, turnaround\n"
-            f"3. AMBIGU — jika tidak menyebut nama tabel spesifik apapun\n"
-            f"CATATAN: Kata 'ru', 'refinery unit', 'kilang', 'equipment', 'laporan', 'data', "
-            f"'status', 'berapa', 'jumlah', 'tampilkan' BUKAN nama tabel — jika hanya menyebut "
-            f"kata-kata itu tanpa nama tabel spesifik maka AMBIGU.\n"
-            f"Jawab hanya satu kata: SAPAAN, SPESIFIK, atau AMBIGU\n\nPertanyaan: {question}"
-        )
-    }])
-    intent = intent_check.content.strip().upper()
+    # ── Cek awal: Python keyword shortcut — bypass LLM untuk keyword yang pasti SPESIFIK ──
+    _q_lower = question.lower()
+    _SPESIFIK_KEYWORDS = [
+        "pipeline", "atg", "metering", "rotor", "icu", "bad actor", "paf",
+        "zero clamp", "power stream", "anggaran", "tkdn", "rcps", "boc",
+        "readiness jetty", "readiness tank", "readiness spm",
+        "workplan jetty", "workplan tank", "spm workplan",
+        "inspection plan", "monitoring operasi",
+        "irkap", "inspection", "prokja",
+        "reservasi", "turnaround",
+    ]
+    _SAPAAN_KEYWORDS = [
+        "halo", "hai", "hello", "hi ", "selamat pagi", "selamat siang",
+        "selamat sore", "selamat malam", "terima kasih", "makasih", "thanks",
+        "apa yang bisa", "kamu bisa apa", "kemampuan", "siapa kamu",
+    ]
+    if any(kw in _q_lower for kw in _SAPAAN_KEYWORDS) and not any(kw in _q_lower for kw in _SPESIFIK_KEYWORDS):
+        intent = "SAPAAN"
+    elif any(kw in _q_lower for kw in _SPESIFIK_KEYWORDS):
+        intent = "SPESIFIK"
+    else:
+        # Fallback ke LLM hanya jika keyword shortcut tidak match
+        intent_check = llm.invoke([{
+            "role": "user",
+            "content": (
+                f"Klasifikasikan pertanyaan berikut ke salah satu kategori:\n"
+                f"1. SAPAAN — jika sapaan, terima kasih, tanya kemampuan AI, atau obrolan umum yang tidak butuh data\n"
+                f"2. SPESIFIK — jika menyebut nama tabel/data berikut secara eksplisit: "
+                f"Pipeline, ATG, Metering, Rotor, ICU, Bad Actor, PAF, Zero Clamp, Power Stream, "
+                f"Anggaran, TKDN, RCPS, BOC, Readiness Jetty, Readiness Tank, Readiness SPM, "
+                f"Workplan Jetty, Workplan Tank, SPM Workplan, Inspection Plan, Monitoring Operasi, "
+                f"IRKAP, IRKAP Program, IRKAP Actual, reservasi, PR, PO, material TA, turnaround\n"
+                f"3. AMBIGU — jika tidak menyebut nama tabel spesifik apapun\n"
+                f"CATATAN: Kata 'ru', 'refinery unit', 'kilang', 'equipment', 'laporan', 'data', "
+                f"'status', 'berapa', 'jumlah', 'tampilkan' BUKAN nama tabel — jika hanya menyebut "
+                f"kata-kata itu tanpa nama tabel spesifik maka AMBIGU.\n"
+                f"Jawab hanya satu kata: SAPAAN, SPESIFIK, atau AMBIGU\n\nPertanyaan: {{question}}"
+            )
+        }])
+        intent = intent_check.content.strip().upper()
 
     if "SAPAAN" in intent:
         greeting_response = llm.invoke(messages + [{"role": "user", "content": question}])
         return greeting_response.content
 
     if "AMBIGU" in intent:
-        return "Laporan apa yang kamu maksud? 😊 Misalnya: Pipeline, ATG, Metering, Rotor, ICU, Bad Actor, BOC, Anggaran, atau yang lain?"
+        return "Laporan apa yang kamu maksud? 😊 Misalnya: Pipeline, ATG, Metering, Rotor, ICU, Bad Actor, BOC, Anggaran, IRKAP, atau yang lain?"
 
     # ── Cek PRISMA via LLM ──
     prisma_table_list = ", ".join(PRISMA_TABLES) if PRISMA_TABLES else "taex_reservasi, prisma_reservasi, kumpulan_summary, sap_pr, sap_po, work_order"

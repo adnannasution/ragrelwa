@@ -29,7 +29,7 @@ llm = ChatOpenAI(
     base_url="https://ai.dinoiki.com/v1",
     temperature=0.7,
 )
-
+ 
 # ─── 3. PRISMA INTEGRATION ────────────────────────────────────────────────────
 def fetch_prisma_schema() -> dict:
     """Fetch schema dari PRISMA saat startup."""
